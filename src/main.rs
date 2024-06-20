@@ -55,9 +55,27 @@ pub enum MainError {
     JsonError(#[from] serde_json::Error),
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct NumericalPair {
+    id: String,
+    pattern: String,
+    #[serde(rename = "type")]
+    type_: String,
+    context: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PatternPair {
+    id: String,
+    pattern: String,
+    type_: String,
+    context: String,
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
 
     let client = Neo4jClient::new("bolt://localhost:7687", "neo4j", "system2024!", "neo4j").await?;
 
@@ -65,7 +83,7 @@ async fn main() -> Result<(), MainError> {
     let nodes = client.query_nodes().await?;
     let node_data: Vec<_> = nodes.iter().map(|node| {
         json!({
-            "id": node.properties.iter().find(|prop| prop.name == "id").map(|prop| &prop.value).unwrap_or(&String::new()),
+            "id": node.entity.replace("Node(", "").replace(")", ""),
             "content": node.properties.iter().find(|prop| prop.name == "content").map(|prop| &prop.value).unwrap_or(&String::new())
         })
     }).collect();
@@ -135,6 +153,7 @@ async fn main() -> Result<(), MainError> {
     let keyword_pairs: Vec<KeywordPair> = serde_json::from_value(result["keyword_pairs"].clone())?;
     let causal_pairs: Vec<CausalPair> = serde_json::from_value(result["causal_pairs"].clone())?;
     let hierarchical_pairs: Vec<HierarchicalPair> = serde_json::from_value(result["hierarchical_pairs"].clone())?;
+    let numerical_pairs: Vec<PatternPair> = serde_json::from_value(result["numerical_pairs"].clone())?;
 
     info!("Creating new relationships...");
     for pair in similar_pairs {
@@ -150,9 +169,9 @@ async fn main() -> Result<(), MainError> {
 
     for pair in keyword_pairs {
         for keyword in &pair.keywords {
+            let rel_type = format!("RELATED_TO_{}", keyword.replace(' ', "_").to_uppercase());
             if let Some(start_node_id) = client.get_internal_node_id(&pair.start_id).await? {
                 if let Some(end_node_id) = client.get_internal_node_id(&pair.end_id).await? {
-                    let rel_type = format!("RELATED_TO_{}", keyword.replace(' ', "_").to_uppercase());
                     debug!("Creating {} relationship between {} and {}", rel_type, start_node_id, end_node_id);
                     if let Err(e) = client.create_relationship(start_node_id, end_node_id, &rel_type).await {
                         error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
@@ -168,9 +187,8 @@ async fn main() -> Result<(), MainError> {
             debug!("Start node ID for causal pair: {}", start_node_id);
             if let Some(end_node_id) = client.get_internal_node_id(&pair.id).await? {
                 debug!("End node ID for causal pair: {}", end_node_id);
-                let rel_type = pair.phrase.replace(' ', "_").to_uppercase(); // Convert phrase to suitable relationship type
-                debug!("Creating {} relationship between {} and {}", rel_type, start_node_id, end_node_id);
-                if let Err(e) = client.create_relationship(start_node_id, end_node_id, &rel_type).await {
+                debug!("Creating CAUSED_BY relationship between {} and {}", start_node_id, end_node_id);
+                if let Err(e) = client.create_relationship(start_node_id, end_node_id, "CAUSED_BY").await {
                     error!("Failed to create causal relationship for node {}: {:?}", pair.id, e);
                 }
             }
@@ -191,12 +209,20 @@ async fn main() -> Result<(), MainError> {
         }
     }
 
+    for pair in numerical_pairs {
+        debug!("Processing pattern pair: {:?}", pair);
+        if let Some(start_node_id) = client.get_internal_node_id(&pair.id).await? {
+            debug!("Start node ID for pattern pair: {}", start_node_id);
+            let rel_type = format!("PATTERN_{}", pair.type_.replace(' ', "_").to_uppercase());
+            if let Err(e) = client.create_relationship(start_node_id, start_node_id, &rel_type).await {
+                error!("Failed to create pattern relationship for node {}: {:?}", pair.id, e);
+            }
+        }
+    }
+
     info!("Done");
-
-
 
     Ok(())
 }
-
 
 

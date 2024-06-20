@@ -7,10 +7,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 import nltk
 from nltk.corpus import stopwords
 import re
+import textblob
 
 # Ensure you have the NLTK stopwords dataset downloaded
 nltk.download('stopwords')
-stop_words = list(set(stopwords.words('english')))  # Convert set to list
+stop_words = list(set(stopwords.words('english')))
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG, handlers=[logging.StreamHandler()])
@@ -55,6 +56,28 @@ def detect_hierarchical_relationships(contents):
                 logger.debug(f"Found hierarchical heading in content with id {idx}: {content}")
     return hierarchical_pairs
 
+def detect_numerical_patterns(contents):
+    numerical_pairs = []
+    patterns = {
+        "date": r"\b\d{4}-\d{2}-\d{2}\b",
+        "time": r"\b\d{2}:\d{2}:\d{2}\b",
+        "currency": r"\b\d+\.\d{2} [A-Z]{3}\b",
+        "percentage": r"\b\d+(\.\d+)?%\b",
+        "phone": r"\b\d{3}-\d{3}-\d{4}\b"
+    }
+    for idx, content in enumerate(contents):
+        for type_, pattern in patterns.items():
+            matches = re.findall(pattern, content)
+            for match in matches:
+                numerical_pairs.append({
+                    "id": str(idx),  # Ensure id is a string
+                    "pattern": match,
+                    "type_": type_,  # Ensure type_ is included
+                    "context": content
+                })
+                logger.debug(f"Found pattern '{match}' of type '{type_}' in content with id {idx}")
+    return numerical_pairs
+
 def vectorize_and_find_similar(nodes, threshold=0.8, keyword_threshold=0.2):
     logger.info("Loading BERT model and tokenizer...")
     model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
@@ -76,6 +99,7 @@ def vectorize_and_find_similar(nodes, threshold=0.8, keyword_threshold=0.2):
     keyword_pairs = []
     causal_pairs = detect_causal_relationships(contents)
     hierarchical_pairs = detect_hierarchical_relationships(contents)
+    numerical_pairs = detect_numerical_patterns(contents)
 
     logger.info("Calculating cosine similarities...")
     for i in range(num_nodes):
@@ -102,7 +126,7 @@ def vectorize_and_find_similar(nodes, threshold=0.8, keyword_threshold=0.2):
                 })
                 logger.debug(f"Found keyword overlap: {valid_nodes[i]['id']} and {valid_nodes[j]['id']} with keywords {common_keywords}")
 
-    return similar_pairs, keyword_pairs, causal_pairs, hierarchical_pairs
+    return similar_pairs, keyword_pairs, causal_pairs, hierarchical_pairs, numerical_pairs
 
 if __name__ == "__main__":
     logger.info("Reading input data...")
@@ -118,13 +142,14 @@ if __name__ == "__main__":
 
     logger.info("Finished reading input data")
 
-    similar_pairs, keyword_pairs, causal_pairs, hierarchical_pairs = vectorize_and_find_similar(input_data)
+    similar_pairs, keyword_pairs, causal_pairs, hierarchical_pairs, numerical_pairs = vectorize_and_find_similar(input_data)
 
     output = {
         "similar_pairs": similar_pairs,
         "keyword_pairs": keyword_pairs,
         "causal_pairs": causal_pairs,
-        "hierarchical_pairs": hierarchical_pairs
+        "hierarchical_pairs": hierarchical_pairs,
+        "numerical_pairs": numerical_pairs
     }
 
     logger.info(f"Writing results to file: {output_file_path}")
