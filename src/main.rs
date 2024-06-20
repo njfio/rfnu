@@ -33,8 +33,8 @@ struct KeywordPair {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct CausalPair {
     id: String,
-    phrase: String,
     context: String,
+    phrase: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -57,11 +57,7 @@ pub enum MainError {
 
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-
-    // Print current working directory for debugging
-    let current_dir = env::current_dir()?;
-    println!("Current working directory: {:?}", current_dir);
+    env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
 
     let client = Neo4jClient::new("bolt://localhost:7687", "neo4j", "system2024!", "neo4j").await?;
 
@@ -69,7 +65,7 @@ async fn main() -> Result<(), MainError> {
     let nodes = client.query_nodes().await?;
     let node_data: Vec<_> = nodes.iter().map(|node| {
         json!({
-            "id": node.entity.replace("Node(", "").replace(")", ""),
+            "id": node.properties.iter().find(|prop| prop.name == "id").map(|prop| &prop.value).unwrap_or(&String::new()),
             "content": node.properties.iter().find(|prop| prop.name == "content").map(|prop| &prop.value).unwrap_or(&String::new())
         })
     }).collect();
@@ -79,7 +75,6 @@ async fn main() -> Result<(), MainError> {
 
     info!("Running vector analysis...");
 
-    // Provide the absolute path to the Python script
     let script_path = "/Users/n/RustroverProjects/rfnu/src/vectorize_and_analyze.py";
     debug!("Script path: {:?}", script_path);
 
@@ -90,7 +85,6 @@ async fn main() -> Result<(), MainError> {
     let input_file_path = "/Users/n/RustroverProjects/rfnu/temp_input.json";
     let output_file_path = "/Users/n/RustroverProjects/rfnu/temp_output.json";
 
-    // Write node data to a temporary input file
     std::fs::write(input_file_path, node_data_json)?;
 
     let mut child = Command::new("python3")
@@ -105,7 +99,6 @@ async fn main() -> Result<(), MainError> {
     let stdout = BufReader::new(child.stdout.take().expect("Failed to capture stdout"));
     let stderr = BufReader::new(child.stderr.take().expect("Failed to capture stderr"));
 
-    // Capture and print stdout and stderr in real-time
     let stdout_thread = std::thread::spawn(move || {
         let mut output = String::new();
         for line in stdout.lines() {
@@ -135,11 +128,9 @@ async fn main() -> Result<(), MainError> {
         return Err(MainError::PythonScriptError("Python script failed".into()));
     }
 
-    // Read the output file from the Python script
     let output_data = std::fs::read_to_string(output_file_path)?;
     let result: serde_json::Value = serde_json::from_str(&output_data)?;
 
-    // Process the output from the Python script
     let similar_pairs: Vec<SimilarPair> = serde_json::from_value(result["similar_pairs"].clone())?;
     let keyword_pairs: Vec<KeywordPair> = serde_json::from_value(result["keyword_pairs"].clone())?;
     let causal_pairs: Vec<CausalPair> = serde_json::from_value(result["causal_pairs"].clone())?;
@@ -147,36 +138,63 @@ async fn main() -> Result<(), MainError> {
 
     info!("Creating new relationships...");
     for pair in similar_pairs {
-        if let Err(e) = client.create_relationship(&pair.start_id, &pair.end_id, "SIMILAR_TO").await {
-            error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+        if let Some(start_node_id) = client.get_internal_node_id(&pair.start_id).await? {
+            if let Some(end_node_id) = client.get_internal_node_id(&pair.end_id).await? {
+                debug!("Creating SIMILAR_TO relationship between {} and {}", start_node_id, end_node_id);
+                if let Err(e) = client.create_relationship(start_node_id, end_node_id, "SIMILAR_TO").await {
+                    error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+                }
+            }
         }
     }
 
     for pair in keyword_pairs {
-        if let Err(e) = client.create_relationship(&pair.start_id, &pair.end_id, "KEYWORD_OVERLAP").await {
-            error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+        if let Some(start_node_id) = client.get_internal_node_id(&pair.start_id).await? {
+            if let Some(end_node_id) = client.get_internal_node_id(&pair.end_id).await? {
+                debug!("Creating KEYWORD_OVERLAP relationship between {} and {}", start_node_id, end_node_id);
+                if let Err(e) = client.create_relationship(start_node_id, end_node_id, "KEYWORD_OVERLAP").await {
+                    error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+                }
+            }
         }
     }
 
     for pair in causal_pairs {
-        debug!("Creating relationship for causal pair: {}", pair.id);
-        if let Some(node_id) = client.get_node_id_by_content(&pair.context).await? {
-            if let Err(e) = client.create_relationship(&node_id, &pair.id, "CAUSED_BY").await {
-                error!("Failed to create causal relationship for node {}: {:?}", pair.id, e);
+        debug!("Processing causal pair: {:?}", pair);
+        if let Some(start_node_id) = client.get_internal_node_id_by_content(&pair.context).await? {
+            debug!("Start node ID for causal pair: {}", start_node_id);
+            if let Some(end_node_id) = client.get_internal_node_id(&pair.id).await? {
+                debug!("End node ID for causal pair: {}", end_node_id);
+                let rel_type = pair.phrase.replace(' ', "_").to_uppercase(); // Convert phrase to suitable relationship type
+                debug!("Creating {} relationship between {} and {}", rel_type, start_node_id, end_node_id);
+                if let Err(e) = client.create_relationship(start_node_id, end_node_id, &rel_type).await {
+                    error!("Failed to create causal relationship for node {}: {:?}", pair.id, e);
+                }
             }
         }
     }
 
     for pair in hierarchical_pairs {
-        debug!("Creating relationship for hierarchical pair: {}", pair.id);
-        if let Some(node_id) = client.get_node_id_by_content(&pair.heading).await? {
-            if let Err(e) = client.create_relationship(&node_id, &pair.id, "PART_OF").await {
-                error!("Failed to create hierarchical relationship for node {}: {:?}", pair.id, e);
+        debug!("Processing hierarchical pair: {:?}", pair);
+        if let Some(start_node_id) = client.get_internal_node_id_by_content(&pair.heading).await? {
+            debug!("Start node ID for hierarchical pair: {}", start_node_id);
+            if let Some(end_node_id) = client.get_internal_node_id(&pair.id).await? {
+                debug!("End node ID for hierarchical pair: {}", end_node_id);
+                debug!("Creating PART_OF relationship between {} and {}", start_node_id, end_node_id);
+                if let Err(e) = client.create_relationship(start_node_id, end_node_id, "PART_OF").await {
+                    error!("Failed to create hierarchical relationship for node {}: {:?}", pair.id, e);
+                }
             }
         }
     }
 
     info!("Done");
 
+
+    info!("Done");
+
     Ok(())
 }
+
+
+

@@ -33,11 +33,12 @@ def detect_causal_relationships(contents):
             if phrase in content.lower():
                 causal_pairs.append({
                     "id": str(idx),  # Ensure id is a string
-                    "phrase": phrase,
+                    "phrase": phrase.replace(' ', '_').upper(),  # Convert phrase to a suitable relationship type
                     "context": content
                 })
                 logger.debug(f"Found causal phrase '{phrase}' in content with id {idx}")
     return causal_pairs
+
 
 def detect_hierarchical_relationships(contents):
     hierarchical_pairs = []

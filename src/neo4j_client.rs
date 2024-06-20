@@ -1,4 +1,4 @@
-use neo4rs::{Graph, query, ConfigBuilder, Node, Relation, Query};
+use neo4rs::{Graph, Query, ConfigBuilder, Node, Relation, query};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use log::{debug, error};
@@ -21,6 +21,8 @@ pub enum Neo4jClientError {
     Neo4jError(#[from] neo4rs::Error),
     #[error("Other error: {0}")]
     OtherError(String),
+    #[error("Deserialization error: {0}")]
+    DeserializationError(#[from] serde_json::Error),
 }
 
 pub struct Neo4jClient {
@@ -42,11 +44,11 @@ impl Neo4jClient {
 
     pub async fn query_nodes(&self) -> Result<Vec<QueryResult>, Neo4jClientError> {
         let query_str = "MATCH (n) RETURN n";
-        let mut result = self.graph.execute(query(query_str)).await?;
+        let mut result = self.graph.execute(Query::new(query_str.to_string())).await?;
         let mut query_results = Vec::new();
 
         while let Ok(Some(row)) = result.next().await {
-            let node: Node = row.get("n").unwrap();
+            let node: Node = row.get("n").map_err(|e| Neo4jClientError::OtherError(e.to_string()))?;
             let mut props = Vec::new();
             for key in node.keys() {
                 match node.get::<String>(key) {
@@ -69,11 +71,11 @@ impl Neo4jClient {
 
     pub async fn query_relationships(&self) -> Result<Vec<QueryResult>, Neo4jClientError> {
         let query_str = "MATCH ()-[r]->() RETURN r";
-        let mut result = self.graph.execute(query(query_str)).await?;
+        let mut result = self.graph.execute(Query::new(query_str.to_string())).await?;
         let mut query_results = Vec::new();
 
         while let Ok(Some(row)) = result.next().await {
-            let relationship: Relation = row.get("r").unwrap();
+            let relationship: Relation = row.get("r").map_err(|e| Neo4jClientError::OtherError(e.to_string()))?;
             let mut props = Vec::new();
             for key in relationship.keys() {
                 match relationship.get::<String>(key) {
@@ -94,36 +96,39 @@ impl Neo4jClient {
         Ok(query_results)
     }
 
-    pub async fn check_node_exists(&self, node_id: &str) -> Result<bool, Neo4jClientError> {
-        let query_str = format!("MATCH (n {{id: '{}'}}) RETURN n", node_id);
-        let q = query(&query_str);
+    pub async fn check_node_exists(&self, node_id: i64) -> Result<bool, Neo4jClientError> {
+        let query_str = format!("MATCH (n) WHERE ID(n) = {} RETURN n", node_id);
+        let q = Query::new(query_str.clone());
         debug!("Check node existence Query_string: {}", query_str);
 
         let mut result = self.graph.execute(q).await?;
         Ok(result.next().await?.is_some())
     }
 
-    pub async fn create_relationship(&self, start_id: &str, end_id: &str, rel_type: &str) -> Result<(), Neo4jClientError> {
-        // Check if both nodes exist
-        if !self.check_node_exists(start_id).await? {
-            error!("Node with id {} does not exist", start_id);
-            return Err(Neo4jClientError::OtherError(format!("Node with id {} does not exist", start_id)));
-        }
+    pub async fn create_relationship(&self, start_id: i64, end_id: i64, rel_type: &str) -> Result<(), Neo4jClientError> {
+        // Check if the relationship already exists
+        let check_query_str = format!(
+            "MATCH (a)-[r:{}]->(b) WHERE ID(a) = {} AND ID(b) = {} RETURN r",
+            rel_type, start_id, end_id
+        );
+        let check_q = query(&check_query_str);
+        debug!("Check relationship existence Query_string: {}", check_query_str);
 
-        if !self.check_node_exists(end_id).await? {
-            error!("Node with id {} does not exist", end_id);
-            return Err(Neo4jClientError::OtherError(format!("Node with id {} does not exist", end_id)));
+        let mut check_result = self.graph.execute(check_q).await?;
+        if check_result.next().await?.is_some() {
+            debug!("Relationship between {} and {} already exists", start_id, end_id);
+            return Ok(());
         }
 
         // Create the relationship
-        let query_str = format!(
-            "MATCH (a {{id: '{}'}}), (b {{id: '{}'}}) CREATE (a)-[:{}]->(b)",
+        let create_query_str = format!(
+            "MATCH (a), (b) WHERE ID(a) = {} AND ID(b) = {} CREATE (a)-[:{}]->(b)",
             start_id, end_id, rel_type
         );
-        let q = query(&query_str);
-        debug!("Query_string: {}", query_str);
+        let create_q = query(&create_query_str);
+        debug!("Create relationship Query_string: {}", create_query_str);
 
-        match self.graph.run(q).await {
+        match self.graph.run(create_q).await {
             Ok(_) => {
                 debug!("Successfully created relationship between {} and {}", start_id, end_id);
             },
@@ -133,82 +138,46 @@ impl Neo4jClient {
             }
         }
 
-        // Verify the relationship
-        let verify_query_str = format!(
-            "MATCH (a {{id: '{}'}})-[r:{}]->(b {{id: '{}'}}) RETURN r",
-            start_id, rel_type, end_id
-        );
-        let verify_q = query(&verify_query_str);
-        debug!("Verify Query_string: {}", verify_query_str);
-
-        let mut result = self.graph.execute(verify_q).await?;
-        match result.next().await {
-            Ok(Some(_)) => {
-                debug!("Verified relationship between {} and {}", start_id, end_id);
-            },
-            Ok(None) => {
-                error!("Failed to verify relationship between {} and {}", start_id, end_id);
-            },
-            Err(e) => {
-                error!("Error during verification of relationship between {} and {}: {}", start_id, end_id, e);
-            }
-        }
-
         Ok(())
     }
 
-    pub async fn query_schema(&self) -> Result<String, Neo4jClientError> {
-        let mut schema = String::new();
 
-        // Query nodes
-        let node_query_str = "CALL db.schema.nodeTypeProperties()";
-        let mut node_result = self.graph.execute(query(node_query_str)).await?;
-        while let Ok(Some(row)) = node_result.next().await {
-            schema.push_str("Node:\n");
-            match row.to::<serde_json::Value>() {
-                Ok(node_properties) => {
-                    schema.push_str(&format!("{:?}\n", node_properties));
-                }
-                Err(e) => {
-                    error!("Error deserializing node properties: {:?}", e);
-                }
-            }
-        }
-
-        // Query relationships
-        let rel_query_str = "CALL db.schema.relTypeProperties()";
-        let mut rel_result = self.graph.execute(query(rel_query_str)).await?;
-        while let Ok(Some(row)) = rel_result.next().await {
-            schema.push_str("Relationship:\n");
-            match row.to::<serde_json::Value>() {
-                Ok(rel_properties) => {
-                    schema.push_str(&format!("{:?}\n", rel_properties));
-                }
-                Err(e) => {
-                    error!("Error deserializing relationship properties: {:?}", e);
-                }
-            }
-        }
-
-        Ok(schema)
-    }
-
-    pub async fn get_node_id_by_content(&self, content: &str) -> Result<Option<String>, Neo4jClientError> {
-        let content_str = content.to_string();
-        let query_str = "MATCH (n {content: $content}) RETURN n.id".to_string();
-        let q = Query::new(query_str).param("content", content_str);
-        debug!("Get node ID by content Query: MATCH (n {{content: $content}}) RETURN n.id, content: {}", content);
+    pub async fn get_internal_node_id_by_content(&self, content: &str) -> Result<Option<i64>, Neo4jClientError> {
+        let query_str = "MATCH (n {content: $content}) RETURN ID(n)".to_string();
+        let q = Query::new(query_str.clone()).param("content", content.to_string());
+        debug!("Get internal node ID by content Query: {}, content: {}", query_str, content);
 
         let mut result = self.graph.execute(q).await?;
-        match result.next().await {
-            Ok(Some(row)) => {
-                match row.get::<String>("n.id") {
-                    Ok(node_id) => Ok(Some(node_id)),
-                    Err(_) => Ok(None),
-                }
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(Neo4jClientError::Neo4jError(e)),
+        if let Some(row) = result.next().await? {
+            let node_id: i64 = row.get("ID(n)").map_err(|e| Neo4jClientError::OtherError(e.to_string()))?;
+            debug!("Internal Node ID by content: {}", node_id);
+            return Ok(Some(node_id));
         }
+
+        Ok(None)
+    }
+
+    pub async fn get_internal_node_id(&self, id: &str) -> Result<Option<i64>, Neo4jClientError> {
+        let query_str: String;
+        let q: Query;
+
+        if id.chars().all(char::is_numeric) {
+            query_str = "MATCH (n) WHERE ID(n) = $id RETURN ID(n)".to_string();
+            q = Query::new(query_str.clone()).param("id", id.parse::<i64>().map_err(|e| Neo4jClientError::OtherError(e.to_string()))?);
+            debug!("Get internal node ID by internal ID Query: {}, id: {}", query_str, id);
+        } else {
+            query_str = "MATCH (n {id: $external_id}) RETURN ID(n)".to_string();
+            q = Query::new(query_str.clone()).param("external_id", id.to_string());
+            debug!("Get internal node ID by external ID Query: {}, external_id: {}", query_str, id);
+        }
+
+        let mut result = self.graph.execute(q).await?;
+        if let Some(row) = result.next().await? {
+            let node_id: i64 = row.get("ID(n)").map_err(|e| Neo4jClientError::OtherError(e.to_string()))?;
+            debug!("Internal Node ID: {}", node_id);
+            return Ok(Some(node_id));
+        }
+
+        Ok(None)
     }
 }
