@@ -1,0 +1,15 @@
+[package]
+name = "rfnu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ndarray = "0.15.1"
+ndarray-linalg = "0.15.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+env_logger = "0.9"
+log = "0.4"
+thiserror = "1.0.61"
+neo4rs = "0.7.1"
