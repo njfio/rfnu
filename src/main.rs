@@ -149,11 +149,14 @@ async fn main() -> Result<(), MainError> {
     }
 
     for pair in keyword_pairs {
-        if let Some(start_node_id) = client.get_internal_node_id(&pair.start_id).await? {
-            if let Some(end_node_id) = client.get_internal_node_id(&pair.end_id).await? {
-                debug!("Creating KEYWORD_OVERLAP relationship between {} and {}", start_node_id, end_node_id);
-                if let Err(e) = client.create_relationship(start_node_id, end_node_id, "KEYWORD_OVERLAP").await {
-                    error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+        for keyword in &pair.keywords {
+            if let Some(start_node_id) = client.get_internal_node_id(&pair.start_id).await? {
+                if let Some(end_node_id) = client.get_internal_node_id(&pair.end_id).await? {
+                    let rel_type = format!("RELATED_TO_{}", keyword.replace(' ', "_").to_uppercase());
+                    debug!("Creating {} relationship between {} and {}", rel_type, start_node_id, end_node_id);
+                    if let Err(e) = client.create_relationship(start_node_id, end_node_id, &rel_type).await {
+                        error!("Failed to create relationship between {} and {}: {:?}", pair.start_id, pair.end_id, e);
+                    }
                 }
             }
         }
@@ -191,7 +194,6 @@ async fn main() -> Result<(), MainError> {
     info!("Done");
 
 
-    info!("Done");
 
     Ok(())
 }
